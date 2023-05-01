@@ -1,0 +1,51 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            "justMyCode": true
+        }, 
+        {
+            "name": "Python: Test register128",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": [ "--model", "models/00500.h5",
+                      "--moving", "data/OASIS_OAS1_0001_MR1/aligned_norm.nii.gz",
+                      "--moved", "data/OASIS_moved0500.nii.gz",
+                      "--warp", "data/OASIS_warp0500.nii.gz",
+                      "--fixed", "data/OASIS_OAS1_0002_MR1/aligned_norm.nii.gz",
+                      "--shrink"
+                      //"--slidingwindow",
+                      //"--gpu", "0"
+                    ],
+            "env": {"PYTHONPATH":"/workspaces/voxelmorph"},
+            "cwd": "${workspaceFolder}",
+            "justMyCode": true
+        }, 
+        {
+            "name": "Python: Test dummy infer",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": ["--gpu", "3", "--model_path", "../logs/model-28-ResNet50-lr99-s0-f2-2022-12-20 08-13-02/model.pth",
+                            "--img_size","64",
+                            "--model", "resnet",
+                            "--model_size","50",
+                            "--kernel_size","3",
+                            "--dicomdir", "/data/testInfer"],
+            "cwd": "${fileDirname}",
+            "justMyCode": true
+        }
+    ]
+}
