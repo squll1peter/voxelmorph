@@ -35,6 +35,33 @@ import tensorflow as tf
 import skimage
 from scipy.ndimage import gaussian_filter, zoom
 
+def save_volfile(array, filename, affine=None, refHeader = None):
+    """
+    Copy of vxm.utils.save_volfile
+    Saves an array to nii, nii.gz, or npz format.
+
+    Parameters:
+        array: The array to save.
+        filename: Filename to save to.
+        affine: Affine vox-to-ras matrix. Saves LIA matrix if None (default).
+    """
+    if filename.endswith(('.nii', '.nii.gz')):
+        import nibabel as nib
+        if affine is None and array.ndim >= 3:
+            # use LIA transform as default affine
+            affine = np.array([[-1, 0, 0, 0],  # nopep8
+                               [0, 0, 1, 0],  # nopep8
+                               [0, -1, 0, 0],  # nopep8
+                               [0, 0, 0, 1]], dtype=float)  # nopep8
+            pcrs = np.append(np.array(array.shape[:3]) / 2, 1)
+            affine[:3, 3] = -np.matmul(affine, pcrs)[:3]
+        nib.save(nib.Nifti1Image(array, affine, header=refHeader), filename)
+    elif filename.endswith('.npz'):
+        np.savez_compressed(filename, vol=array)
+    else:
+        raise ValueError('unknown filetype for %s' % filename)
+
+
 def is_affine_orthogonal(affine,tolerance=0.001):
     affine2 = affine[0:3,0:3]
     row_sums = affine2.sum(axis=1)
@@ -63,7 +90,19 @@ def resample_to_isotropic(in_array, affine, mode="smallest", ret_affine=False):
     # here we're doing almost alway upscaling, thus area interp is not needed.
     return zoom(in_array, axis_ratio/min_edge )
 
-    
+def image_histogram_equalization(image, number_bins=2048):
+    # from http://www.janeriksolem.net/histogram-equalization-with-python-and.html
+    # https://stackoverflow.com/questions/28518684/histogram-equalization-of-grayscale-images-with-numpy
+
+    # get image histogram
+    image_histogram, bins = np.histogram(image.flatten(), number_bins, density=True)
+    cdf = image_histogram.cumsum() # cumulative distribution function
+    cdf = (number_bins-1) * cdf / cdf[-1] # normalize
+
+    # use linear interpolation of cdf to find new pixel values
+    image_equalized = np.interp(image.flatten(), bins[:-1], cdf)
+
+    return image_equalized.reshape(image.shape), cdf
 
 def register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=None, gpu=None, 
                 multichannel=False, method="slidingwindow", window_size = np.array([128,128,128]),
@@ -87,38 +126,49 @@ def register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=None, gpu=None
 
     orig_moving = np.copy(moving)
     orig_fixed  = np.copy(fixed)
+
     #normalization.
+    moving, cdf_m = image_histogram_equalization(moving)
+    fixed, cdf_f  = image_histogram_equalization(fixed)
     moving = (moving - np.min(moving))/(np.max(moving) - np.min(moving))
     fixed  = (fixed  - np.min(fixed ))/(np.max(fixed ) - np.min(fixed ))
 
-    # gaussian
     if inshape[0]>128 or inshape[1]>128 or inshape[2]>128:
         if method == "slidingwindow":
             # Method1: slice image to obtain 128x128x128 chunks. 
+            # setup mask
             masked_window_size = window_size - mask_border*2
             mask_slice = (slice(None),slice(mask_border[0], window_size[0] - mask_border[0]),
                                       slice(mask_border[1], window_size[1] - mask_border[1]),
                                       slice(mask_border[2], window_size[2] - mask_border[2]),slice(None))
+            
             window_shift = masked_window_size -  overlap
-            window_num = np.ceil((inshape - overlap) / window_shift)
-            padded_size = (window_num * window_shift + overlap).astype(np.int16)
+            window_num = np.ceil((inshape - overlap - mask_border*2) / window_shift)
+            padded_size = (window_num * window_shift + overlap + mask_border*2).astype(np.int16)
+            # tf input is 5D  N-HWD-C
             padded_fixed =  np.pad(fixed,  [[0,0],[0, padded_size[0]-inshape[0]], [0, padded_size[1]-inshape[1]],[0,padded_size[2]-inshape[2]],[0,0]])
             padded_moving = np.pad(moving, [[0,0],[0, padded_size[0]-inshape[0]], [0, padded_size[1]-inshape[1]],[0,padded_size[2]-inshape[2]],[0,0]])
+            # number of sampled, for ovelap management.
             padded_nb_sample = np.zeros_like(padded_moving)
-            #generate gaussian map
+            #generate gaussian map: same size as inference window
             tmp = np.zeros(window_size)
             tmp [ [i // 2 for i in window_size]] = 1
             gaussian_map = np.expand_dims(gaussian_filter(tmp, sigma = gaussian_scale*window_size), axis=[0,4])
             gaussian_map3 = np.concatenate([gaussian_map, gaussian_map, gaussian_map], axis=4)
+            # generate grid for sliding. 
             xx, yy, zz = np.mgrid[0:window_num[0], 0:window_num[1], 0:window_num[2]]
             grid = np.vstack([xx.ravel(), yy.ravel(), zz.ravel()]).T.astype(np.int16)
             grid_coordinates = [ [(window_shift[0]*x),  overlap[0]+window_shift[0]*(x+1), 
                                   (window_shift[1]*y),  overlap[1]+window_shift[1]*(y+1),
                                   (window_shift[2]*z),  overlap[2]+window_shift[2]*(z+1)] for x,y,z in grid]
+            # slice object for pythonic slicing of array
+            # slice(None) is equivalent to all => [:]
             grid_slices = [(slice(None),slice(g[0],g[1]),slice(g[2],g[3]),slice(g[4],g[5]),slice(None)) for g in grid_coordinates]
-            infer_slices = [(slice(None),slice(g[0],g[1]),slice(g[2],g[3]),slice(g[4],g[5]),slice(None)) for g in grid_coordinates]
+            infer_slices = [(slice(None),slice(g[0],g[0]+window_size[0]),slice(g[2],g[2]+window_size[1]),slice(g[4],g[4]+window_size[2]),slice(None)) for g in grid_coordinates]
             grid_count = len(grid_coordinates)
+            # Channel=3 for warp
             padded_warp =np.zeros([padded_fixed.shape[0],padded_fixed.shape[1],padded_fixed.shape[2],padded_fixed.shape[3],3])
+            # inference
             config = dict(inshape=window_size, input_model=None)
             tf.config.run_functions_eagerly(True)
             with tf.device(device):
@@ -127,12 +177,14 @@ def register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=None, gpu=None
                 for i, grid_slice in enumerate(grid_slices):
                     # load model and predict
                     print("Registering grid#{}/{}".format(i+1, grid_count))
-                    warp_patch = synthmorph.register(padded_moving[grid_slice], padded_fixed[grid_slice])
+                    infer_slice = infer_slices[i]
+                    warp_patch = synthmorph.register(padded_moving[infer_slice], padded_fixed[infer_slice])
                     padded_warp[grid_slice] += warp_patch[mask_slice] * gaussian_map3[mask_slice]
                     padded_nb_sample[grid_slice] += gaussian_map[mask_slice]
+            
             padded_warp = padded_warp/ np.concatenate([padded_nb_sample, padded_nb_sample, padded_nb_sample], axis=4)
             warp = padded_warp[:,0:inshape[0],0:inshape[1],0:inshape[2],:]
-            vxm.py.utils.save_volfile(warp.squeeze(), warp_pth, fixed_affine)
+            # vxm.py.utils.save_volfile(warp.squeeze(), warp_pth, fixed_affine)
 
             print("done registration, now perform transform")
             moved = vxm.networks.Transform(inshape, nb_feats=nb_feats).predict([orig_moving, warp])
@@ -164,7 +216,7 @@ def register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=None, gpu=None
     print("done transform, save images.")
     # save warp
     if warp_pth:
-        vxm.py.utils.save_volfile(warp.squeeze(), warp_pth, fixed_affine)
+        save_volfile(warp.squeeze(), warp_pth, fixed_affine)
 
     # save moved image
     vxm.py.utils.save_volfile(moved.squeeze(), moved_pth, fixed_affine)
@@ -181,9 +233,9 @@ moving_pth = "data/C+_filled.nii.gz"
 fixed_pth  = "data/C-_filled.nii.gz"
 moved_pth  = "data/C+_filled_sl_moved.nii.gz"
 warp_pth   = "data/C+_filled_sl_warp.nii.gz"
-model      = "models/02000.h5"
+model      = "models/01820.h5"
 sub_pth    = "data/C+_sub.nii.gz"
 sub_pth_moved = "data/C+_sub_moved.nii.gz"
-register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=warp_pth, gpu=None, 
+register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=warp_pth, gpu=0, 
                 multichannel=False, overlap = np.array([32,32,32]),
                 method="slidingwindow", sub_pth=sub_pth, sub_pth_moved=sub_pth_moved, mask_border=np.array([16,16,16]))
