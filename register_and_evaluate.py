@@ -79,16 +79,19 @@ def get_affine_axis_ratio(affine, abs = False):
     else:
         return np.linalg.eigvals(affine[0:3,0:3])
 
-def resample_to_isotropic(in_array, affine, mode="smallest", ret_affine=False):
+def resample_to_isotropic(in_array, affine, voxel_size = None, ret_affine=False):
     if not is_affine_orthogonal(affine):
         print("non-orthogonal matrix is not supported..")
         return in_array
     if is_affine_isotropic(affine):
         return in_array
     axis_ratio = get_affine_axis_ratio(affine, abs=True)
-    min_edge = np.min(axis_ratio)
+    if voxel_size == None or voxel_size<=0:
+        min_edge = np.min(axis_ratio)
+    else:
+        min_edge = voxel_size
     # here we're doing almost alway upscaling, thus area interp is not needed.
-    return zoom(in_array, axis_ratio/min_edge )
+    return np.expand_dims(zoom(np.squeeze(in_array),  axis_ratio/min_edge), axis=(0,4))
 
 def image_histogram_equalization(image, number_bins=2048):
     # from http://www.janeriksolem.net/histogram-equalization-with-python-and.html
@@ -121,17 +124,34 @@ def register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=None, gpu=None
 
     
 
-    inshape = moving.shape[1:-1]
-    nb_feats = moving.shape[-1] #channel
 
+
+    if not np.array_equal(moving_affine,fixed_affine) or not np.array_equal(moving.shape,fixed.shape):
+        print("volume are not equal, exit")
+        return
+    
     orig_moving = np.copy(moving)
     orig_fixed  = np.copy(fixed)
+    orig_shape  = orig_moving.shape[1:-1]
 
     #normalization.
     moving, cdf_m = image_histogram_equalization(moving)
     fixed, cdf_f  = image_histogram_equalization(fixed)
     moving = (moving - np.min(moving))/(np.max(moving) - np.min(moving))
     fixed  = (fixed  - np.min(fixed ))/(np.max(fixed ) - np.min(fixed ))
+
+
+    # resample to isotropic
+    f_resampled = False
+    if not is_affine_isotropic(moving_affine):
+        print("volume are not isotropic, perform resmapling")
+        f_resampled = True
+        moving = resample_to_isotropic(moving, moving_affine, voxel_size=3)
+        fixed = resample_to_isotropic(fixed, fixed_affine, voxel_size=3)
+
+    inshape = moving.shape[1:-1]
+    nb_feats = moving.shape[-1] #channel
+
 
     if inshape[0]>128 or inshape[1]>128 or inshape[2]>128:
         if method == "slidingwindow":
@@ -171,6 +191,7 @@ def register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=None, gpu=None
             # inference
             config = dict(inshape=window_size, input_model=None)
             tf.config.run_functions_eagerly(True)
+            batch_num = 8
             with tf.device(device):
                 print("loading synmorph model...")
                 synthmorph = vxm.networks.VxmDense.load(model, **config)
@@ -187,7 +208,11 @@ def register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=None, gpu=None
             # vxm.py.utils.save_volfile(warp.squeeze(), warp_pth, fixed_affine)
 
             print("done registration, now perform transform")
-            moved = vxm.networks.Transform(inshape, nb_feats=nb_feats).predict([orig_moving, warp])
+            if f_resampled:
+                rewarp = skimage.transform.resize_local_mean(warp,  [1, orig_shape[0], orig_shape[1], orig_shape[2],1])
+                moved = vxm.networks.Transform(orig_shape, nb_feats=nb_feats).predict([orig_moving, rewarp])
+            else:
+                moved = vxm.networks.Transform(inshape, nb_feats=nb_feats).predict([orig_moving, warp])
         elif method == "shrink":
             # Method2: shirnk images to fit 128x128x128, calculate warp, then re-expand warp to fit original size, then performe warping.
             dim_max = np.max(inshape)
@@ -203,6 +228,10 @@ def register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=None, gpu=None
                 warp = skimage.transform.resize_local_mean(re_warp, [1, dim_max, dim_max, dim_max,3])*(dim_max/128)  # displacement also increased after upsizing.
                 warp = warp[:,0:inshape[0],0:inshape[1],0:inshape[2],:]
                 print("done registration, now perform transform")
+            if f_resampled:
+                rewarp = skimage.transform.resize_local_mean(warp,  [1, orig_shape[0], orig_shape[1], orig_shape[2],1])
+                moved = vxm.networks.Transform(orig_shape, nb_feats=nb_feats).predict([orig_moving, rewarp])
+            else:
                 moved = vxm.networks.Transform(inshape, nb_feats=nb_feats).predict([orig_moving, warp])
     else:
         with tf.device(device):
@@ -210,7 +239,11 @@ def register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=None, gpu=None
             config = dict(inshape=inshape, input_model=None)
             warp = vxm.networks.VxmDense.load(model, **config).register(moving, fixed)
             print("done registration, now perform transform")
-            moved = vxm.networks.Transform(inshape, nb_feats=nb_feats).predict([orig_moving, warp])
+            if f_resampled:
+                rewarp = skimage.transform.resize_local_mean(warp,  [1, orig_shape[0], orig_shape[1], orig_shape[2],1])
+                moved = vxm.networks.Transform(orig_shape, nb_feats=nb_feats).predict([orig_moving, rewarp])
+            else:
+                moved = vxm.networks.Transform(inshape, nb_feats=nb_feats).predict([orig_moving, warp])
 
 
     print("done transform, save images.")
@@ -233,9 +266,9 @@ moving_pth = "data/C+_filled.nii.gz"
 fixed_pth  = "data/C-_filled.nii.gz"
 moved_pth  = "data/C+_filled_sl_moved.nii.gz"
 warp_pth   = "data/C+_filled_sl_warp.nii.gz"
-model      = "models/01820.h5"
+model      = "models/02000.h5"
 sub_pth    = "data/C+_sub.nii.gz"
 sub_pth_moved = "data/C+_sub_moved.nii.gz"
-register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=warp_pth, gpu=0, 
+register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=warp_pth, gpu=None, 
                 multichannel=False, overlap = np.array([32,32,32]),
                 method="slidingwindow", sub_pth=sub_pth, sub_pth_moved=sub_pth_moved, mask_border=np.array([16,16,16]))
