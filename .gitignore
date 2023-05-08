@@ -3,3 +3,5 @@ data/
 result/
 models/
 scratch/*
+.devcontainer/
+data/
