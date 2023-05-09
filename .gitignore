@@ -3,4 +3,9 @@ data/
 result/
 models/
 scratch/*
+<<<<<<< HEAD
 .devcontainer/
+=======
+.devcontainer/
+data/
+>>>>>>> a2ae6f086d52e25b5db450e6668bef6a6d71fe70
