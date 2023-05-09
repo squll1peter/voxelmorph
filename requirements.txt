@@ -3,3 +3,4 @@ neurite
 scikit-image
 pandas
 seaborn
+SimpleITK
