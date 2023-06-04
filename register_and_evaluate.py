@@ -203,7 +203,7 @@ def register128(moving_pth, fixed_pth, moved_pth, model, warp_pth=None, gpu=None
             warp = vxm.networks.VxmDense.load(model, **config).register(moving, fixed)
             print("done registration, now perform transform")
             if f_resampled:
-                rewarp = skimage.transform.resize_local_mean(warp,  [1, orig_shape[0], orig_shape[1], orig_shape[2],1])
+                rewarp = skimage.transform.resize_local_mean(warp,  [1, orig_shape[0], orig_shape[1], orig_shape[2],3])
                 moved = vxm.networks.Transform(orig_shape, nb_feats=nb_feats).predict([orig_moving, rewarp])
             else:
                 moved = vxm.networks.Transform(inshape, nb_feats=nb_feats).predict([orig_moving, warp])
