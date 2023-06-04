@@ -31,7 +31,7 @@ License.
 
 import numpy as np
 import skimage
-from scipy.ndimage import  map_coordinates
+from scipy.ndimage import  map_coordinates, zoom
 import nibabel as nib
 
 
@@ -74,3 +74,33 @@ def labelDicePath(v1_pth, v2_pth):
     return labelDice(v1, v2)
 
 
+def is_affine_orthogonal(affine,tolerance=0.001):
+    affine2 = affine[0:3,0:3]
+    row_sums = affine2.sum(axis=1)
+    new_matrix = affine2 / row_sums[:, np.newaxis]
+    return np.sum(new_matrix-np.eye(3)) < tolerance
+
+def is_affine_isotropic(affine,tolerance=0.0001):
+    axis = get_affine_axis_ratio(affine)
+    m = np.mean(axis)
+    return  np.sum(np.float_power(axis - m, 2)) < tolerance
+
+def get_affine_axis_ratio(affine, abs = False):
+    if abs:
+        return np.abs(np.linalg.eigvals(affine[0:3,0:3]))
+    else:
+        return np.linalg.eigvals(affine[0:3,0:3])
+
+def resample_to_isotropic(in_array, affine, voxel_size = None, ret_affine=False):
+    if not is_affine_orthogonal(affine):
+        print("non-orthogonal matrix is not supported..")
+        return in_array
+    if is_affine_isotropic(affine):
+        return in_array
+    axis_ratio = get_affine_axis_ratio(affine, abs=True)
+    if voxel_size == None or voxel_size<=0:
+        min_edge = np.min(axis_ratio)
+    else:
+        min_edge = voxel_size
+    # here we're doing almost alway upscaling, thus area interp is not needed.
+    return np.expand_dims(zoom(np.squeeze(in_array),  axis_ratio/min_edge), axis=(0,4))
